@@ -1,0 +1,461 @@
+name: inputSet_329f
+identifier: inputSet_329f
+inputs:
+  overlay:
+    clone:
+      ref:
+        type: branch
+      enabled: true
+    stages:
+      - steps:
+          - run:
+              script: echo "hello world"
+            id: run_1
+            name: run_1
+        id: stage_1
+        name: stage_1
+      - id: dotnetBuildTestHostedLinuxStage_1
+        name: Dotnet Build and Test on Harness Cloud (Linux)
+        clone:
+          enabled: true
+        cache:
+          enabled: true
+        steps:
+          - id: setupDotnet
+            name: Setup Dotnet
+            inputs:
+              version:
+                type: string
+                label: .NET SDK Version
+                default: auto
+                ui:
+                  component: string
+                  tooltip: Enter auto or an exact .NET SDK version, for example 10.0.302. auto
+                    reads the first global.json found under the working
+                    directory and uses 10.0.302 when none is present. A direct
+                    version installs that SDK release.
+                  allowedValueTypes:
+                    - fixed
+                    - runtime
+                    - expression
+              working_directory:
+                type: string
+                label: Working Directory
+                default: .
+                ui:
+                  component: string
+                  tooltip: Enter the repository-relative .NET project directory, for example . for
+                    the root or project for a subdirectory. Automatic SDK
+                    detection searches this directory and its subdirectories for
+                    global.json.
+                  allowedValueTypes:
+                    - fixed
+                    - runtime
+                    - expression
+            layout:
+              - variant: more
+                items:
+                  - working_directory
+            description: Install a .NET SDK on a Harness Cloud host.
+            version: 1
+            author: harness
+            module:
+              - ci
+            alias: setup
+            group:
+              steps:
+                - if: <+<+stage.spec.infrastructure.spec.platform.os> == "Linux">
+                  id: setupDotnetLinux
+                  name: Setup Dotnet on Linux
+                  run:
+                    shell: bash
+                    script: >
+                      set -euo pipefail
+
+
+                      requested='auto'
+
+                      workdir='.'
+
+                      fallback='10.0.302'
+
+                      if [ "$requested" = auto ]; then
+                        metadata_path="$(python3 - "$workdir" <<'PY'
+                      import os, sys
+
+                      root = os.path.abspath(sys.argv[1])
+
+                      if not os.path.isdir(root):
+                          raise SystemExit(f"Working directory does not exist or is not a directory: {root}")
+                      for current, dirs, files in os.walk(root):
+                          dirs[:] = sorted(d for d in dirs if d not in {".git", ".hg", ".svn", "node_modules"})
+                          if "global.json" in files:
+                              print(os.path.join(current, "global.json"))
+                              break
+                      PY
+
+                      )"
+                        if [ -n "$metadata_path" ]; then
+                          version="$(python3 - "$metadata_path" <<'PY'
+                      import json, sys
+
+                      path = sys.argv[1]
+
+                      try:
+                          with open(path, encoding="utf-8") as stream:
+                              value = json.load(stream).get("sdk", {}).get("version")
+                      except (OSError, json.JSONDecodeError) as error:
+                          raise SystemExit(f"Unable to read .NET SDK metadata {path}: {error}")
+                      if not isinstance(value, str) or not value.strip():
+                          raise SystemExit(f".NET SDK metadata {path} must contain a non-empty sdk.version")
+                      print(value.strip())
+
+                      PY
+
+                      )"
+                        else
+                          version="$fallback"
+                        fi
+                      else
+                        version="$requested"
+                      fi
+
+                      if ! [[ "$version" =~
+                      ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z][0-9A-Za-z.-]*)?$
+                      ]]; then
+                        echo ".NET SDK version must be an exact version such as 10.0.302, got: $version" >&2
+                        exit 1
+                      fi
+
+                      channel="$(printf '%s' "$version" | awk -F. '{ print $1
+                      "." $2 }')"
+
+                      case "$(uname -m)" in
+                        x86_64|amd64) rid=linux-x64 ;;
+                        arm64|aarch64) rid=linux-arm64 ;;
+                        *) echo "Unsupported Linux architecture: $(uname -m); supported architectures are amd64 and arm64" >&2; exit 1 ;;
+                      esac
+
+
+                      root="/opt/harness/tools/dotnet/$version"
+
+                      if [ -x "$root/dotnet" ]; then
+                        echo "Reusing .NET SDK $version from $root"
+                      else
+                        metadata="https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/${channel}/releases.json"
+                        tmp="$(mktemp -d)"
+                        trap 'rm -rf "$tmp"' EXIT
+                        if ! curl --fail --location --silent --show-error "$metadata" --output "$tmp/releases.json"; then
+                          echo "Failed to download .NET release metadata for channel $channel from $metadata" >&2
+                          exit 1
+                        fi
+                        python3 - "$tmp/releases.json" "$version" "$rid" > "$tmp/asset" <<'PY'
+                      import json, sys
+
+                      path, version, rid = sys.argv[1:]
+
+                      try:
+                          with open(path, encoding="utf-8") as stream:
+                              releases = json.load(stream)
+                      except (OSError, json.JSONDecodeError) as error:
+                          raise SystemExit(f"Invalid .NET release metadata: {error}")
+                      if not isinstance(releases, dict) or not
+                      isinstance(releases.get("releases"), list):
+                          raise SystemExit("Invalid .NET release metadata: expected a releases array")
+                      for release in releases.get("releases", []):
+                          sdk = release.get("sdk") or {}
+                          if sdk.get("version") == version:
+                              for item in sdk.get("files", []):
+                                  if item.get("rid") == rid and item.get("url", "").endswith(".tar.gz"):
+                                      if not item.get("hash"):
+                                          raise SystemExit(f".NET metadata for {version} {rid} is missing the vendor SHA-512 checksum")
+                                      print(item["url"])
+                                      print(item["hash"])
+                                      raise SystemExit(0)
+                      raise SystemExit(f"No .NET SDK archive found for exact
+                      version {version} on {rid}; verify the version exists")
+
+                      PY
+                        url="$(sed -n '1p' "$tmp/asset")"
+                        expected="$(sed -n '2p' "$tmp/asset")"
+                        if ! [[ "$expected" =~ ^[0-9A-Fa-f]{128}$ ]]; then
+                          echo "Invalid vendor SHA-512 checksum in .NET metadata for $version $rid" >&2
+                          exit 1
+                        fi
+                        if ! curl --fail --location --silent --show-error "$url" --output "$tmp/dotnet.tar.gz"; then
+                          echo "Failed to download .NET SDK $version for $rid from $url" >&2
+                          exit 1
+                        fi
+                        actual="$(sha512sum "$tmp/dotnet.tar.gz" | awk '{ print $1 }')"
+                        [ "${actual^^}" = "${expected^^}" ] || { echo ".NET SDK $version checksum mismatch: the download did not match the vendor SHA-512 checksum" >&2; exit 1; }
+                        mkdir "$tmp/unpacked"
+                        tar -xzf "$tmp/dotnet.tar.gz" -C "$tmp/unpacked"
+                        [ -x "$tmp/unpacked/dotnet" ] || { echo "Downloaded .NET SDK $version archive is missing the dotnet executable" >&2; exit 1; }
+                        sudo rm -rf "$root"
+                        sudo mkdir -p "$(dirname "$root")"
+                        sudo mv "$tmp/unpacked" "$root"
+                      fi
+
+                      sudo ln -sfn "$root" /opt/harness/tools/dotnet/current
+
+                      sudo ln -sfn "$root/dotnet" /usr/local/bin/dotnet
+
+                      dotnet --info
+                    env:
+                      HARNESS_HIDE_WHEN_SKIPPED: "true"
+                - if: <+<+stage.spec.infrastructure.spec.platform.os> == "MacOS">
+                  id: setupDotnetMacos
+                  name: Setup Dotnet on macOS
+                  run:
+                    shell: bash
+                    script: >
+                      set -euo pipefail
+
+
+                      requested='auto'
+
+                      workdir='.'
+
+                      fallback='10.0.302'
+
+                      if [ "$requested" = auto ]; then
+                        metadata_path="$(python3 - "$workdir" <<'PY'
+                      import os, sys
+
+                      root = os.path.abspath(sys.argv[1])
+
+                      if not os.path.isdir(root):
+                          raise SystemExit(f"Working directory does not exist or is not a directory: {root}")
+                      for current, dirs, files in os.walk(root):
+                          dirs[:] = sorted(d for d in dirs if d not in {".git", ".hg", ".svn", "node_modules"})
+                          if "global.json" in files:
+                              print(os.path.join(current, "global.json"))
+                              break
+                      PY
+
+                      )"
+                        if [ -n "$metadata_path" ]; then
+                          version="$(python3 - "$metadata_path" <<'PY'
+                      import json, sys
+
+                      path = sys.argv[1]
+
+                      try:
+                          with open(path, encoding="utf-8") as stream:
+                              value = json.load(stream).get("sdk", {}).get("version")
+                      except (OSError, json.JSONDecodeError) as error:
+                          raise SystemExit(f"Unable to read .NET SDK metadata {path}: {error}")
+                      if not isinstance(value, str) or not value.strip():
+                          raise SystemExit(f".NET SDK metadata {path} must contain a non-empty sdk.version")
+                      print(value.strip())
+
+                      PY
+
+                      )"
+                        else version="$fallback"; fi
+                      else version="$requested"; fi
+
+                      if ! [[ "$version" =~
+                      ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z][0-9A-Za-z.-]*)?$
+                      ]]; then
+                        echo ".NET SDK version must be an exact version such as 10.0.302, got: $version" >&2
+                        exit 1
+                      fi
+
+                      channel="$(printf '%s' "$version" | awk -F. '{ print $1
+                      "." $2 }')"
+
+                      case "$(uname -m)" in x86_64) rid=osx-x64 ;; arm64)
+                      rid=osx-arm64 ;; *) echo "Unsupported macOS architecture:
+                      $(uname -m); supported architectures are x86_64 and arm64"
+                      >&2; exit 1 ;; esac
+
+
+                      root="/opt/harness/tools/dotnet/$version"
+
+                      if [ -x "$root/dotnet" ]; then
+                        echo "Reusing .NET SDK $version from $root"
+                      else
+                        metadata="https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/${channel}/releases.json"
+                        tmp="$(mktemp -d)"
+                        trap 'rm -rf "$tmp"' EXIT
+                        if ! curl --fail --location --silent --show-error "$metadata" --output "$tmp/releases.json"; then echo "Failed to download .NET release metadata for channel $channel from $metadata" >&2; exit 1; fi
+                        python3 - "$tmp/releases.json" "$version" "$rid" > "$tmp/asset" <<'PY'
+                      import json, sys
+
+                      path, version, rid = sys.argv[1:]
+
+                      try:
+                          with open(path, encoding="utf-8") as stream: releases = json.load(stream)
+                      except (OSError, json.JSONDecodeError) as error:
+                          raise SystemExit(f"Invalid .NET release metadata: {error}")
+                      if not isinstance(releases, dict) or not
+                      isinstance(releases.get("releases"), list):
+                          raise SystemExit("Invalid .NET release metadata: expected a releases array")
+                      for release in releases.get("releases", []):
+                          sdk = release.get("sdk") or {}
+                          if sdk.get("version") == version:
+                              for item in sdk.get("files", []):
+                                  if item.get("rid") == rid and item.get("url", "").endswith(".tar.gz"):
+                                      if not item.get("hash"): raise SystemExit(f".NET metadata for {version} {rid} is missing the vendor SHA-512 checksum")
+                                      print(item["url"]); print(item["hash"]); raise SystemExit(0)
+                      raise SystemExit(f"No .NET SDK archive found for exact
+                      version {version} on {rid}; verify the version exists")
+
+                      PY
+                        url="$(sed -n '1p' "$tmp/asset")"; expected="$(sed -n '2p' "$tmp/asset")"
+                        if ! [[ "$expected" =~ ^[0-9A-Fa-f]{128}$ ]]; then echo "Invalid vendor SHA-512 checksum in .NET metadata for $version $rid" >&2; exit 1; fi
+                        if ! curl --fail --location --silent --show-error "$url" --output "$tmp/dotnet.tar.gz"; then echo "Failed to download .NET SDK $version for $rid from $url" >&2; exit 1; fi
+                        actual="$(shasum -a 512 "$tmp/dotnet.tar.gz" | awk '{ print $1 }')"
+                        [ "$(printf '%s' "$actual" | tr '[:lower:]' '[:upper:]')" = "$(printf '%s' "$expected" | tr '[:lower:]' '[:upper:]')" ] || { echo ".NET SDK $version checksum mismatch: the download did not match the vendor SHA-512 checksum" >&2; exit 1; }
+                        mkdir "$tmp/unpacked"
+                        tar -xzf "$tmp/dotnet.tar.gz" -C "$tmp/unpacked"
+                        [ -x "$tmp/unpacked/dotnet" ] || { echo "Downloaded .NET SDK $version archive is missing the dotnet executable" >&2; exit 1; }
+                        sudo rm -rf "$root"
+                        sudo mkdir -p "$(dirname "$root")"
+                        sudo mv "$tmp/unpacked" "$root"
+                      fi
+
+                      sudo ln -sfn "$root" /opt/harness/tools/dotnet/current
+
+                      sudo ln -sfn "$root/dotnet" /usr/local/bin/dotnet
+
+                      dotnet --info
+                    env:
+                      HARNESS_HIDE_WHEN_SKIPPED: "true"
+                - if: <+<+stage.spec.infrastructure.spec.platform.os> == "Windows">
+                  id: setupDotnetWindows
+                  name: Setup Dotnet on Windows
+                  run:
+                    shell: powershell
+                    script: >
+                      $ErrorActionPreference = 'Stop'
+
+                      $requested = 'auto'
+
+                      $workdir = '.'
+
+                      $fallback = '10.0.302'
+
+                      if ($requested -eq 'auto') {
+                        if (-not (Test-Path $workdir -PathType Container)) { throw "Working directory does not exist or is not a directory: $workdir" }
+                        $path = Get-ChildItem -Path $workdir -Filter 'global.json' -File -Recurse -ErrorAction Stop |
+                          Where-Object { $_.FullName -notmatch '[\\/](?:\.git|\.hg|\.svn|node_modules)[\\/]' } |
+                          Sort-Object FullName | Select-Object -First 1
+                        if ($path) {
+                          try { $version = (Get-Content $path.FullName -Raw | ConvertFrom-Json -ErrorAction Stop).sdk.version }
+                          catch { throw "Unable to read .NET SDK metadata $($path.FullName): $($_.Exception.Message)" }
+                          if (-not ($version -is [string]) -or -not $version.Trim()) { throw ".NET SDK metadata $($path.FullName) must contain a non-empty sdk.version" }
+                          $version = $version.Trim()
+                        } else { $version = $fallback }
+                      } else { $version = $requested }
+
+                      if ($version -notmatch
+                      '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?$') {
+                      throw ".NET SDK version must be an exact version such as
+                      10.0.302, got: $version" }
+
+                      if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw
+                      "Unsupported Windows architecture:
+                      $env:PROCESSOR_ARCHITECTURE; only amd64 is supported" }
+
+                      $parts = $version.Split('.')
+
+                      $channel = "$($parts[0]).$($parts[1])"
+
+                      $root = "C:\ProgramData\Harness\tools\dotnet\$version"
+
+                      if (Test-Path (Join-Path $root 'dotnet.exe') -PathType
+                      Leaf) {
+                        Write-Host "Reusing .NET SDK $version from $root"
+                      } else {
+                        $metadataUrl = "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/$channel/releases.json"
+                        try { $metadata = Invoke-RestMethod $metadataUrl -ErrorAction Stop }
+                        catch { throw "Failed to download .NET release metadata for channel $channel from ${metadataUrl}: $($_.Exception.Message)" }
+                        if (-not $metadata.releases) { throw "Invalid .NET release metadata from ${metadataUrl}: expected a releases array" }
+                        $sdk = $metadata.releases | ForEach-Object { $_.sdk } | Where-Object { $_.version -eq $version } | Select-Object -First 1
+                        $asset = $sdk.files | Where-Object { $_.rid -eq 'win-x64' -and $_.url -and $_.url.EndsWith('.zip') } | Select-Object -First 1
+                        if (-not $asset.url) { throw "No .NET SDK archive found for exact version $version on win-x64; verify the version exists" }
+                        if ($asset.hash -notmatch '^[0-9A-Fa-f]{128}$') { throw ".NET metadata for $version win-x64 has a missing or invalid vendor SHA-512 checksum" }
+                        $temp = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
+                        New-Item -ItemType Directory -Path $temp | Out-Null
+                        try {
+                          $archive = Join-Path $temp 'dotnet.zip'
+                          try { Invoke-WebRequest $asset.url -OutFile $archive -ErrorAction Stop }
+                          catch { throw "Failed to download .NET SDK $version for win-x64 from $($asset.url): $($_.Exception.Message)" }
+                          $actual = (Get-FileHash $archive -Algorithm SHA512).Hash.ToUpperInvariant()
+                          if ($actual -ne $asset.hash.ToUpperInvariant()) { throw ".NET SDK $version checksum mismatch: the download did not match the vendor SHA-512 checksum" }
+                          $unpacked = Join-Path $temp 'unpacked'
+                          Expand-Archive $archive -DestinationPath $unpacked
+                          if (-not (Test-Path (Join-Path $unpacked 'dotnet.exe') -PathType Leaf)) { throw "Downloaded .NET SDK $version archive is missing dotnet.exe" }
+                          if (Test-Path $root) { Remove-Item $root -Recurse -Force }
+                          New-Item -ItemType Directory -Force -Path (Split-Path $root) | Out-Null
+                          Move-Item $unpacked $root
+                        } finally {
+                          Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+                        }
+                      }
+
+                      $shim = 'C:\ProgramData\Harness\bin'
+
+                      New-Item -ItemType Directory -Force -Path $shim | Out-Null
+
+                      $target = Join-Path $root 'dotnet.exe'
+
+                      Set-Content -Path (Join-Path $shim 'dotnet.cmd') -Value
+                      "@echo off`r`n`"$target`" %*" -Encoding Ascii
+
+                      $env:DOTNET_ROOT = $root
+
+                      $env:Path = "$shim;$root;$env:Path"
+
+                      [Environment]::SetEnvironmentVariable('DOTNET_ROOT',
+                      $root, 'Machine')
+
+                      $machinePath =
+                      [Environment]::GetEnvironmentVariable('Path', 'Machine')
+
+                      [Environment]::SetEnvironmentVariable('Path',
+                      "$shim;$root;$machinePath", 'Machine')
+
+                      dotnet --info
+                    env:
+                      HARNESS_HIDE_WHEN_SKIPPED: "true"
+          - id: restoreLinux
+            name: Install Dependencies on Linux
+            run:
+              shell: bash
+              script: dotnet restore
+          - id: buildLinux
+            name: Build on Linux
+            run:
+              shell: bash
+              script: dotnet build --no-restore
+          - id: testLinux
+            name: Test on Linux
+            run-test:
+              shell: bash
+              script: dotnet test --no-build --verbosity normal --logger trx
+                --results-directory TestResults --collect:"XPlat Code Coverage"
+                --
+                DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=lcov
+              intelligence:
+                disabled: true
+          - id: coverage
+            name: Upload Coverage
+            run:
+              shell: bash
+              script: >-
+                # coverlet.collector writes coverage.info under a GUID-named
+                subdirectory of
+
+                # TestResults/, which hcli's coverage-file discovery doesn't
+                scan; copy it out.
+
+                mkdir -p coverage
+
+                find TestResults -name 'coverage.info' -exec cp {} coverage/ \;
+
+                hcli cov upload
+              env:
+                CI_ENABLE_HCLI_FOR_TESTS: "true"
