@@ -1,48 +1,43 @@
 pipeline:
+  id: newpipeline_gith
+  name: newpipeline gith
+  description: My first Harness pipeline. Builds a Docker image from the newapp repository and pushes it to Harness Artifact Registry.
+  tags:
+    ai_generated: ""
+  inputs:
+    registry:
+      type: string
+      required: true
+      description: Harness Artifact Registry to push the image to
+    package_name:
+      type: string
+      required: true
+      description: Docker package (image) name without a tag
+    image_tag:
+      type: string
+      required: true
+      description: Tag for the Docker image
+  clone:
+    enabled: true
+    connector: connector_Github_c63e
+    repo: Prashanth32480/newapp
+    ref:
+      type: branch
+      name: main
   stages:
-    - steps:
-        - run:
-            script: echo "hello world"
-    - id: dotnetBuildTestHostedLinuxStage_1
-      name: Dotnet Build and Test on Harness Cloud (Linux)
-      clone:
-        enabled: true
-      cache:
-        enabled: true
+    - id: build
+      name: Build
+      runtime: cloud
+      platform:
+        os: linux
+        arch: amd64
       steps:
-        - id: setupDotnet
-          name: Setup Dotnet
-          template:
-            uses: setupDotnet@1.0.0
-        - id: restoreLinux
-          name: Install Dependencies on Linux
-          run:
-            shell: bash
-            script: |-
-              dotnet restore
-        - id: buildLinux
-          name: Build on Linux
-          run:
-            shell: bash
-            script: |-
-              dotnet build --no-restore
-        - id: testLinux
-          name: Test on Linux
-          run-test:
-            shell: bash
-            script: |-
-              dotnet test --no-build --verbosity normal --logger trx --results-directory TestResults --collect:"XPlat Code Coverage" -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=lcov
-            intelligence:
-              disabled: true
-        - id: coverage
-          name: Upload Coverage
-          run:
-            shell: bash
-            script: |-
-              # coverlet.collector writes coverage.info under a GUID-named subdirectory of
-              # TestResults/, which hcli's coverage-file discovery doesn't scan; copy it out.
-              mkdir -p coverage
-              find TestResults -name 'coverage.info' -exec cp {} coverage/ \;
-              hcli cov upload
-            env:
-              CI_ENABLE_HCLI_FOR_TESTS: "true"
+        - id: build_and_push
+          name: Build and Push Image
+          build:
+            uses: buildAndPushToHAR
+            with:
+              registry: ${{ inputs.registry }}
+              package_name: ${{ inputs.package_name }}
+              tags:
+                - ${{ inputs.image_tag }}
