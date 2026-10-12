@@ -3,3 +3,46 @@ pipeline:
     - steps:
         - run:
             script: echo "hello world"
+    - id: dotnetBuildTestHostedLinuxStage_1
+      name: Dotnet Build and Test on Harness Cloud (Linux)
+      clone:
+        enabled: true
+      cache:
+        enabled: true
+      steps:
+        - id: setupDotnet
+          name: Setup Dotnet
+          template:
+            uses: setupDotnet@1.0.0
+        - id: restoreLinux
+          name: Install Dependencies on Linux
+          run:
+            shell: bash
+            script: |-
+              dotnet restore
+        - id: buildLinux
+          name: Build on Linux
+          run:
+            shell: bash
+            script: |-
+              dotnet build --no-restore
+        - id: testLinux
+          name: Test on Linux
+          run-test:
+            shell: bash
+            script: |-
+              dotnet test --no-build --verbosity normal --logger trx --results-directory TestResults --collect:"XPlat Code Coverage" -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=lcov
+            intelligence:
+              disabled: true
+        - id: coverage
+          name: Upload Coverage
+          run:
+            shell: bash
+            script: |-
+              # coverlet.collector writes coverage.info under a GUID-named subdirectory of
+              # TestResults/, which hcli's coverage-file discovery doesn't scan; copy it out.
+              mkdir -p coverage
+              find TestResults -name 'coverage.info' -exec cp {} coverage/ \;
+              hcli cov upload
+            env:
+              CI_ENABLE_HCLI_FOR_TESTS: "true"
