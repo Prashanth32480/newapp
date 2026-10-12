@@ -1,0 +1,6 @@
+service:
+  name: service_kubernetes_d8cc
+  identifier: service_kubernetes_d8cc
+  serviceDefinition:
+    type: Kubernetes
+    spec: {}
